@@ -30,7 +30,7 @@
     <LinkIncremental>false</LinkIncremental>
     <PostBuildEventUseInBuild>true</PostBuildEventUseInBuild>
     <RemoteRoot>HDD:\</RemoteRoot>
-    <ImageXexOutput>$(OutDir)OpenGscMw2.xex</ImageXexOutput>
+    <ImageXexOutput>$(OutDir)OpenGSC_MW2.xex</ImageXexOutput>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release Retail|Xbox 360'">
     <ClCompile>
