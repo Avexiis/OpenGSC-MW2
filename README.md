@@ -27,8 +27,8 @@ It is a native C++ port of the *loading* half of the [OpenRTM](https://github.co
 
 | Button | Action |
 |---|---|
-| D-Pad Up / Down | Move the selection (wraps around) |
-| A on a file | Expand the entry |
+| D-Pad Up / Down | Move Up / Down |
+| A on a file | Expands to Load / Unload button |
 | A on `Load GSC` (green) | Load the script |
 | A on `Unload GSC` (red) | Unload the script |
 | B | Collapse the entry, or close the menu |
