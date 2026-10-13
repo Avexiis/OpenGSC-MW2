@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "GscRuntimeBridge.h"
 #include <malloc.h>
 
 #define GSC_DIR_PATH "hdd:\\GSC\\MW2"
@@ -280,6 +281,7 @@ static struct GscState
 	// Original hook state captured on the first install for use during unload.
 	BYTE  hookStateStock[HOOK_STATE_SIZE];
 	bool  hookStateStockValid;
+	DWORD helperRejectionsStock;
 
 	// Loaded filename (empty if absent or not file-backed) and pending unload request.
 	char          loadedName[MAX_PATH];
@@ -488,10 +490,48 @@ static GscPatchState ScriptHookState()
 
 static void FlushScriptCaches()
 {
+	FlushRange(SCRIPT_HELPER_CAVE, sizeof(HELPER_HANDLER));
+	FlushRange(SCRIPT_HELPER_HOOK, sizeof(HELPER_HOOK_STOCK));
 	FlushRange(SCRIPT_HOOK_CAVE, sizeof(HOOK_HANDLER));
 	FlushRange(SCRIPT_REDIRECT_START, SCRIPT_REDIRECT_LENGTH);
 	FlushRange(SCRIPT_RESUME_PATCH, sizeof(RESUME_PATCHED));
 	FlushRange(SCRIPT_LOAD_HOOK, sizeof(LOAD_HOOK_CODE));
+}
+
+static GscPatchState ScriptHelperState()
+{
+	BYTE hook[sizeof(HELPER_HOOK_STOCK)];
+	BYTE cave[sizeof(HELPER_HANDLER)];
+	if (!ReadMem(SCRIPT_HELPER_HOOK, hook, sizeof(hook)) || !ReadMem(SCRIPT_HELPER_CAVE, cave, sizeof(cave)))
+	{
+		return GSC_STATE_MIXED;
+	}
+	if (memcmp(hook, HELPER_HOOK_STOCK, sizeof(hook)) == 0 && memcmp(cave, HELPER_CAVE_STOCK, sizeof(cave)) == 0)
+	{
+		return GSC_STATE_STOCK;
+	}
+	if (memcmp(hook, HELPER_HOOK_PATCHED, sizeof(hook)) == 0 && memcmp(cave, HELPER_HANDLER, sizeof(cave)) == 0)
+	{
+		return GSC_STATE_PATCHED;
+	}
+	return GSC_STATE_MIXED;
+}
+
+static bool CheckHelperTargets()
+{
+	for (DWORD i = 0; i < sizeof(HELPER_TARGETS) / sizeof(HELPER_TARGETS[0]); i++)
+	{
+		BYTE bytes[sizeof(HELPER_TARGETS[i].bytes)];
+		if (!ReadMem(HELPER_TARGETS[i].address, bytes, sizeof(bytes)))
+		{
+			return SetFail(FAIL_NOT_READABLE);
+		}
+		if (memcmp(bytes, HELPER_TARGETS[i].bytes, sizeof(bytes)) != 0)
+		{
+			return SetFail("game has incompatible modifications, restart game");
+		}
+	}
+	return true;
 }
 
 // Moves the image pointer stored in the pool copy from one base to the other (install and unload).
@@ -940,6 +980,8 @@ enum BackupIndex
 	BACKUP_HOOK_STATE,
 	BACKUP_LOAD_HOOK,
 	BACKUP_RESUME_PATCH,
+	BACKUP_HELPER_HOOK,
+	BACKUP_HELPER_REJECTIONS,
 	BACKUP_FIXED_COUNT
 };
 
@@ -954,6 +996,7 @@ struct BackupSet
 	bool        imageFromPool;
 	DWORD       poolAddress;
 	DWORD       imageLength;   // bytes of the script image that the rollback writes back
+	BYTE        helperCave[sizeof(HELPER_HANDLER)];
 };
 
 static BackupSet gBackup;   // used under the operation flag only
@@ -1003,7 +1046,13 @@ static bool BackupGameState(BackupSet* b, bool firstInstall, DWORD poolAddress, 
 	bool ok = AddBackup(b, SCRIPT_POINTER, 4)
 		&& AddBackup(b, SCRIPT_HOOK_STATE, HOOK_STATE_SIZE)
 		&& AddBackup(b, SCRIPT_LOAD_HOOK, sizeof(LOAD_HOOK_CODE))
-		&& AddBackup(b, SCRIPT_RESUME_PATCH, sizeof(RESUME_STOCK));
+		&& AddBackup(b, SCRIPT_RESUME_PATCH, sizeof(RESUME_STOCK))
+		&& AddBackup(b, SCRIPT_HELPER_HOOK, sizeof(HELPER_HOOK_STOCK))
+		&& AddBackup(b, SCRIPT_HELPER_REJECTIONS, sizeof(DWORD));
+	if (ok && !ReadMem(SCRIPT_HELPER_CAVE, b->helperCave, sizeof(b->helperCave)))
+	{
+		return SetFail(FAIL_NOT_READABLE);
+	}
 	for (DWORD i = 0; ok && i < REDIRECT_COUNT; i++)
 	{
 		ok = AddBackup(b, REDIRECTS[i].address, 2);
@@ -1026,7 +1075,7 @@ static bool WriteScriptPatches(bool firstInstall, DWORD poolAddress, GscDecoded*
 		}
 		FlushRange(poolAddress, NO_STRINGS_OFFSET + 4);
 	}
-	if (!WriteVerified(SCRIPT_HOOK_STATE, hookState, sizeof(hookState)))
+	if (!WriteVerified(SCRIPT_HOOK_STATE, hookState, sizeof(hookState)) || !WriteU32(SCRIPT_HELPER_REJECTIONS, 0))
 	{
 		return false;
 	}
@@ -1035,14 +1084,21 @@ static bool WriteScriptPatches(bool firstInstall, DWORD poolAddress, GscDecoded*
 	if (firstInstall)
 	{
 		DWORD ptr = 0;
-		if (!WriteVerified(SCRIPT_HOOK_CAVE, HOOK_HANDLER, sizeof(HOOK_HANDLER))
+		if (!WriteVerified(SCRIPT_HELPER_CAVE, HELPER_HANDLER, sizeof(HELPER_HANDLER)))
+		{
+			return false;
+		}
+		FlushRange(SCRIPT_HELPER_CAVE, sizeof(HELPER_HANDLER));
+		if (!WriteVerified(SCRIPT_HELPER_HOOK, HELPER_HOOK_PATCHED, sizeof(HELPER_HOOK_PATCHED))
+			|| !WriteVerified(SCRIPT_HOOK_CAVE, HOOK_HANDLER, sizeof(HOOK_HANDLER))
 			|| !WriteU32(SCRIPT_POINTER, poolAddress)
 			|| !WriteRedirects(true)
 			|| !WriteVerified(SCRIPT_RESUME_PATCH, RESUME_PATCHED, sizeof(RESUME_PATCHED)))
 		{
 			return false;
 		}
-		if (ScriptPatchState() != GSC_STATE_PATCHED || !ReadU32(SCRIPT_POINTER, &ptr) || ptr != poolAddress)
+		if (ScriptPatchState() != GSC_STATE_PATCHED || ScriptHelperState() != GSC_STATE_PATCHED
+			|| !ReadU32(SCRIPT_POINTER, &ptr) || ptr != poolAddress)
 		{
 			return SetFail(FAIL_WRITE);
 		}
@@ -1062,6 +1118,7 @@ static bool WriteScriptPatches(bool firstInstall, DWORD poolAddress, GscDecoded*
 	FlushScriptCaches();
 	FlushRange(SCRIPT_IMAGE, d->bytecodeLen);
 	FlushRange(SCRIPT_HOOK_STATE, HOOK_STATE_SIZE);
+	FlushRange(SCRIPT_HELPER_REJECTIONS, sizeof(DWORD));
 	if (firstInstall)
 	{
 		FlushRange(poolAddress, SCRIPT_POOL_SIZE);
@@ -1086,6 +1143,10 @@ static bool RollbackPatches(const BackupSet* b)
 	{
 		restored = WriteVerified(b->entries[i].address, b->entries[i].data, b->entries[i].length);
 	}
+	if (restored)
+	{
+		restored = WriteVerified(SCRIPT_HELPER_CAVE, b->helperCave, sizeof(b->helperCave));
+	}
 	if (restored && b->imageFromPool)
 	{
 		restored = WriteVerified(SCRIPT_HOOK_CAVE, HOOK_CAVE_STOCK, sizeof(HOOK_CAVE_STOCK));
@@ -1096,11 +1157,9 @@ static bool RollbackPatches(const BackupSet* b)
 	}
 	// Replace the write failure reason with the rollback result.
 	gsc.failReason = restored ? "memory write failed, rollback done" : "write failed, rollback FAILED - restart game";
-	if (restored)
-	{
-		FlushScriptCaches();
-		FlushRange(SCRIPT_IMAGE, b->imageLength);
-	}
+	FlushScriptCaches();
+	FlushRange(SCRIPT_IMAGE, b->imageLength);
+	FlushRange(SCRIPT_HELPER_REJECTIONS, sizeof(DWORD));
 	return restored;
 }
 
@@ -1156,12 +1215,25 @@ static bool IsMainMenu()
 		&& ReadU32(SCRIPT_HOOK_STATE + 4, &hookStep) && hookStep - 1 > 2;
 }
 
+static bool CheckInstallState(bool* firstInstall);
+
 // Set wroteMemory when the first game-memory write is attempted; before that, our buffers are private.
 static bool InstallScript(bool firstInstall, DWORD poolAddress, GscDecoded* d, bool* wroteMemory)
 {
 	if (!TakeScriptLock())
 	{
 		return false;
+	}
+	if (!IsMainMenu())
+	{
+		ReleaseScriptLock();
+		return SetBusy();
+	}
+	bool currentFirstInstall = false;
+	if (!CheckInstallState(&currentFirstInstall) || currentFirstInstall != firstInstall || !CheckHelperTargets())
+	{
+		ReleaseScriptLock();
+		return SetFail(FAIL_MIXED_STATE);
 	}
 
 	BackupSet* backup = &gBackup;
@@ -1170,6 +1242,7 @@ static bool InstallScript(bool firstInstall, DWORD poolAddress, GscDecoded* d, b
 	{
 		// Keep the original hook state for unloading.
 		memcpy(gsc.hookStateStock, backup->entries[BACKUP_HOOK_STATE].data, HOOK_STATE_SIZE);
+		memcpy(&gsc.helperRejectionsStock, backup->entries[BACKUP_HELPER_REJECTIONS].data, sizeof(DWORD));
 		gsc.hookStateStockValid = true;
 	}
 	if (ok)
@@ -1207,7 +1280,7 @@ static bool InstallScript(bool firstInstall, DWORD poolAddress, GscDecoded* d, b
 static bool CheckInstallState(bool* firstInstall)
 {
 	GscPatchState state = ScriptPatchState();
-	if (state == GSC_STATE_MIXED || state != ScriptHookState())
+	if (state == GSC_STATE_MIXED || state != ScriptHookState() || state != ScriptHelperState())
 	{
 		return SetFail(FAIL_MIXED_STATE);
 	}
@@ -1744,7 +1817,7 @@ static bool RestoreStock(const char** reason)
 		return true;
 	}
 	DWORD ptr = 0;
-	if (ScriptPatchState() != GSC_STATE_PATCHED || ScriptHookState() != GSC_STATE_PATCHED
+	if (ScriptPatchState() != GSC_STATE_PATCHED || ScriptHookState() != GSC_STATE_PATCHED || ScriptHelperState() != GSC_STATE_PATCHED
 		|| !ReadU32(SCRIPT_POINTER, &ptr) || ptr != gsc.scriptBuffer || !gsc.hookStateStockValid)
 	{
 		*reason = FAIL_MIXED_STATE;
@@ -1752,6 +1825,18 @@ static bool RestoreStock(const char** reason)
 	}
 	if (!TakeScriptLock())
 	{
+		return false;
+	}
+	if (!IsMainMenu())
+	{
+		ReleaseScriptLock();
+		return SetBusy();
+	}
+	bool firstInstall = false;
+	if (!CheckInstallState(&firstInstall) || firstInstall)
+	{
+		*reason = FAIL_MIXED_STATE;
+		ReleaseScriptLock();
 		return false;
 	}
 
@@ -1773,15 +1858,19 @@ static bool RestoreStock(const char** reason)
 
 		// Restore the load hook first to stop new cave calls; restore the cave last.
 		ok = WriteVerified(SCRIPT_LOAD_HOOK, LOAD_HOOK_STOCK, sizeof(LOAD_HOOK_STOCK))
+			&& WriteVerified(SCRIPT_HELPER_HOOK, HELPER_HOOK_STOCK, sizeof(HELPER_HOOK_STOCK))
 			&& WriteVerified(SCRIPT_RESUME_PATCH, RESUME_STOCK, sizeof(RESUME_STOCK))
 			&& WriteRedirects(false)
 			&& WriteU32(SCRIPT_POINTER, STOCK_SCRIPT_POINTER)
 			&& WriteVerified(SCRIPT_IMAGE, image, SCRIPT_POOL_SIZE)
 			&& WriteVerified(SCRIPT_HOOK_STATE, gsc.hookStateStock, HOOK_STATE_SIZE)
+			&& WriteU32(SCRIPT_HELPER_REJECTIONS, gsc.helperRejectionsStock)
+			&& WriteVerified(SCRIPT_HELPER_CAVE, HELPER_CAVE_STOCK, sizeof(HELPER_CAVE_STOCK))
 			&& WriteVerified(SCRIPT_HOOK_CAVE, HOOK_CAVE_STOCK, sizeof(HOOK_CAVE_STOCK));
 		FlushScriptCaches();
 		FlushRange(SCRIPT_IMAGE, SCRIPT_POOL_SIZE);
 		FlushRange(SCRIPT_HOOK_STATE, HOOK_STATE_SIZE);
+		FlushRange(SCRIPT_HELPER_REJECTIONS, sizeof(DWORD));
 		FlushRange(SCRIPT_POINTER, 4);
 		if (!ok)
 		{

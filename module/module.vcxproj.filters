@@ -33,6 +33,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="xex.xml" />
+    <None Include="asm\iw4-helpers.s" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">
@@ -42,6 +43,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="GscLoader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GscRuntimeBridge.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Utils.h">

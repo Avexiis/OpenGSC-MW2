@@ -99,6 +99,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="xex.xml" />
+    <None Include="asm\iw4-helpers.s" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Detour.h" />
@@ -107,6 +108,7 @@
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="Utils.h" />
     <ClInclude Include="GscLoader.h" />
+    <ClInclude Include="GscRuntimeBridge.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
